@@ -82,6 +82,13 @@ def parse_args(argv=None):
         "the finished part keeps nominal size",
     )
     p.add_argument(
+        "--smooth",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Chaikin smoothing iterations for clean contours (0 to disable, default: 2)",
+    )
+    p.add_argument(
         "--holes",
         choices=["keep", "discard"],
         default="keep",
@@ -138,15 +145,53 @@ def load_binary(path: Path, threshold: int | None, invert: bool, blur: int) -> n
     return binary
 
 
+def upscale_mask(binary: np.ndarray, scale: int = 4) -> np.ndarray:
+    """Upscale, blur and re-threshold the mask to get sub-pixel smooth edges."""
+    up = cv2.resize(binary, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+    up = cv2.GaussianBlur(up, (0, 0), scale)
+    _, up = cv2.threshold(up, 127, 255, cv2.THRESH_BINARY)
+    return up
+
+
+def chaikin(points: np.ndarray, iterations: int) -> np.ndarray:
+    """Chaikin corner-cutting smoothing for closed polygons."""
+    pts = points.astype(np.float64)
+    for _ in range(iterations):
+        nxt = np.roll(pts, -1, axis=0)
+        a = 0.75 * pts + 0.25 * nxt
+        b = 0.25 * pts + 0.75 * nxt
+        pts = np.empty((2 * len(pts), 2), np.float64)
+        pts[0::2] = a
+        pts[1::2] = b
+    return pts
+
+
 def extract_shapes(
-    binary: np.ndarray, px_per_mm: float, min_area_mm2: float, simplify_mm: float
+    binary: np.ndarray,
+    px_per_mm: float,
+    min_area_mm2: float,
+    simplify_mm: float,
+    smooth: int,
 ) -> list[dict]:
-    contours, hierarchy = cv2.findContours(binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    scale = 4
+    mask = upscale_mask(binary, scale)
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     if hierarchy is None:
         return []
     hierarchy = hierarchy[0]
-    simplify_px = max(simplify_mm * px_per_mm, 1.0)
-    min_area_px = min_area_mm2 * px_per_mm**2
+    simplify_px = max(simplify_mm * px_per_mm * scale, 1.0)
+    min_area_px = min_area_mm2 * (px_per_mm * scale) ** 2
+
+    def clean_ring(contour: np.ndarray) -> np.ndarray | None:
+        ring = cv2.approxPolyDP(contour, simplify_px, True).reshape(-1, 2)
+        if len(ring) < 3:
+            return None
+        if smooth > 0:
+            ring = chaikin(ring, smooth)
+            ring = cv2.approxPolyDP(
+                ring.reshape(-1, 1, 2).astype(np.float32), max(simplify_px / 4, 1.0), True
+            ).reshape(-1, 2)
+        return ring / scale
 
     shapes = []
     for i, contour in enumerate(contours):
@@ -154,15 +199,15 @@ def extract_shapes(
             continue
         if cv2.contourArea(contour) < min_area_px:
             continue
-        outer = cv2.approxPolyDP(contour, simplify_px, True).reshape(-1, 2)
-        if len(outer) < 3:
+        outer = clean_ring(contour)
+        if outer is None:
             continue
         holes = []
         child = hierarchy[i][2]
         while child != -1:
             if cv2.contourArea(contours[child]) >= min_area_px:
-                hole = cv2.approxPolyDP(contours[child], simplify_px, True).reshape(-1, 2)
-                if len(hole) >= 3:
+                hole = clean_ring(contours[child])
+                if hole is not None:
                     holes.append(hole)
             child = hierarchy[child][0]
         shapes.append({"outer": outer, "holes": holes})
@@ -204,7 +249,9 @@ def apply_kerf(poly: Polygon, kerf_mm: float) -> Polygon:
 
 def process(args) -> list[Polygon]:
     binary = load_binary(args.input, args.threshold, args.invert, args.blur)
-    shapes = extract_shapes(binary, args.px_per_mm, args.min_area_mm2, args.simplify)
+    shapes = extract_shapes(
+        binary, args.px_per_mm, args.min_area_mm2, args.simplify, args.smooth
+    )
     logger.info("found %d shape(s)", len(shapes))
     polys = shapes_to_polygons(shapes, args.px_per_mm)
 
