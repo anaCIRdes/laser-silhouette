@@ -78,7 +78,8 @@ def parse_args(argv=None):
         "--kerf",
         type=float,
         default=0.0,
-        help="laser kerf compensation in mm; positive shrinks the part outline",
+        help="laser kerf compensation in mm; positive grows the part outline so "
+        "the finished part keeps nominal size",
     )
     p.add_argument(
         "--holes",
@@ -106,7 +107,10 @@ def load_binary(path: Path, threshold: int | None, invert: bool, blur: int) -> n
     img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise SystemExit(f"error: cannot read image: {path}")
-    if blur and blur % 2 == 1 and blur > 0:
+    if blur and blur > 0:
+        if blur % 2 == 0:
+            blur += 1
+            logger.info("even blur kernel not supported, using %d", blur)
         img = cv2.medianBlur(img, blur)
     if threshold is None:
         _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
@@ -167,13 +171,16 @@ def shapes_to_polygons(shapes: list[dict], px_per_mm: float) -> list[Polygon]:
 
 
 def apply_kerf(poly: Polygon, kerf_mm: float) -> Polygon:
+    # The beam removes material on both sides of the path (kerf/2 each), so the
+    # part ends up undersized and holes oversized. Compensate by growing the
+    # polygon: outer contour moves outward by kerf/2, holes move inward.
     if kerf_mm == 0:
         return poly
-    shrunk = poly.buffer(-kerf_mm / 2.0, join_style=2)
-    if shrunk.is_empty:
+    grown = poly.buffer(kerf_mm / 2.0, join_style=2)
+    if grown.is_empty:
         logger.warning("kerf too large: shape vanished, keeping original outline")
         return poly
-    return shrunk
+    return grown
 
 
 def process(args) -> list[Polygon]:
@@ -252,8 +259,6 @@ def write_svg(polys: list[Polygon], path: Path, dpi_hint: int) -> None:
 def write_dxf(polys: list[Polygon], path: Path) -> None:
     doc = ezdxf.new("R2000", setup=False)
     doc.header["$INSUNITS"] = 4
-    doc.header["$EXTMIN"] = (0.0, 0.0, 0.0)
-    doc.header["$EXTMAX"] = (0.0, 0.0, 0.0)
     msp = doc.modelspace()
     minx, miny, _, maxy = bounds_mm(polys)
     for poly in polys:

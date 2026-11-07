@@ -21,7 +21,7 @@ python3 laser_silhouette.py bild.png -o teil.dxf --kerf 0.1
 2. **Rauschunterdrückung** – Median-Filter (`--blur`)
 3. **Konturextraktion** – äußere Formen plus Innenkonturen (Löcher) als geschlossene Polygone
 4. **Knotenreduktion** – Douglas-Peucker (`--simplify`, Standard 0,2 mm Toleranz)
-5. **Kerf-Kompensation** – `--kerf 0.1` schrumpft die Kontur um die halbe Schnittfuge-Breite, damit das Teil Maßhaltigkeit behält
+5. **Kerf-Kompensation** – `--kerf 0.1` vergrößert die Außenkontur (und verkleinert Löcher) um die halbe Schnittfuge-Breite, damit das Teil Maßhaltigkeit behält
 6. **Überlappungs-Merge** – `--merge-overlaps` vereinigt überlappende Formen, um doppelte Schnittlinien zu vermeiden
 7. **Schnittreihenfolge** – `--order topleft` (Lesart) oder `inside-out` (Löcher zuerst)
 
