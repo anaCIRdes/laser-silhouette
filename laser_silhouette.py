@@ -89,6 +89,18 @@ def parse_args(argv=None):
         help="Chaikin smoothing iterations for clean contours (0 to disable, default: 2)",
     )
     p.add_argument(
+        "--fit-circles",
+        action="store_true",
+        help="detect circular parts (e.g. balloons) and export them as perfect "
+        "circles instead of the jagged merged outline",
+    )
+    p.add_argument(
+        "--circle-min-r",
+        type=float,
+        default=2.0,
+        help="minimum circle radius in mm for --fit-circles (default: 2)",
+    )
+    p.add_argument(
         "--holes",
         choices=["keep", "discard"],
         default="keep",
@@ -263,6 +275,12 @@ def process(args) -> list[Polygon]:
         polys = list(merged.geoms) if merged.geom_type == "MultiPolygon" else [merged]
         logger.info("merged into %d shape(s)", len(polys))
 
+    if getattr(args, "fit_circles", False):
+        binary = load_binary(args.input, args.threshold, args.invert, args.blur)
+        circles = detect_circles(binary, args.px_per_mm, args.circle_min_r)
+        logger.info("detected %d circle(s)", len(circles))
+        polys = apply_circle_fit(polys, circles, args.min_area_mm2)
+
     polys = [apply_kerf(p, args.kerf) for p in polys]
 
     if args.holes == "discard":
@@ -270,6 +288,62 @@ def process(args) -> list[Polygon]:
 
     order_shapes(polys, args.order)
     return polys
+
+
+def disk(cx: float, cy: float, r: float, segments: int = 72) -> Polygon:
+    angles = np.linspace(0, 2 * np.pi, segments, endpoint=False)
+    return Polygon(
+        [(cx + r * np.cos(a), cy + r * np.sin(a)) for a in angles]
+    )
+
+
+def detect_circles(binary: np.ndarray, px_per_mm: float, min_r_mm: float) -> list[Polygon]:
+    """Detect filled circular regions in the material mask and return them
+    as polygons in mm coordinates (y flipped like shapes_to_polygons)."""
+    h, w = binary.shape
+    min_r = max(min_r_mm * px_per_mm, 3.0)
+    max_r = min(h, w) / 2.0
+    if max_r <= min_r:
+        return []
+    blur = cv2.GaussianBlur(binary, (9, 9), 2)
+    found = cv2.HoughCircles(
+        blur,
+        cv2.HOUGH_GRADIENT,
+        dp=1,
+        minDist=int(min_r * 2),
+        param1=100,
+        param2=35,
+        minRadius=int(min_r),
+        maxRadius=int(max_r),
+    )
+    if found is None:
+        return []
+    circles = []
+    for cx, cy, r in np.round(found[0]).astype(int):
+        if r <= 0 or r > max_r:
+            continue
+        mask = np.zeros((h, w), np.uint8)
+        cv2.circle(mask, (cx, cy), r, 1, -1)
+        coverage = np.count_nonzero(mask & (binary > 0)) / np.count_nonzero(mask)
+        if coverage < 0.8:
+            continue
+        circles.append(disk(cx / px_per_mm, -cy / px_per_mm, r / px_per_mm))
+    return circles
+
+
+def apply_circle_fit(
+    polys: list[Polygon], circles: list[Polygon], min_area_mm2: float
+) -> list[Polygon]:
+    """Cut detected circles out of the shapes and add them as separate parts."""
+    result = []
+    for poly in polys:
+        rest = poly
+        for circ in circles:
+            rest = rest.difference(circ)
+        parts = rest.geoms if rest.geom_type == "MultiPolygon" else [rest]
+        result.extend(p for p in parts if p.area >= min_area_mm2)
+    result.extend(c for c in circles if c.area >= min_area_mm2)
+    return result
 
 
 def order_shapes(polys: list[Polygon], mode: str) -> None:

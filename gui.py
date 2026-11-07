@@ -84,6 +84,8 @@ class ConverterGUI:
         add_entry("Kantenglättung", "smooth", 2, width=3)
         add_entry("Kerf", "kerf", 0.0, suffix="mm")
         add_combo("Löcher", "holes", ["keep", "discard"], "keep")
+        add_check("Kreise erkennen (Ballons etc.)", "fit_circles", False)
+        add_entry("Min. Kreisradius", "circle_min_r", 2.0, suffix="mm")
         add_check("Überlappungen mergen", "merge_overlaps", False)
         add_combo("Schnittreihenfolge", "order", ["topleft", "inside-out", "none"], "topleft")
 
@@ -163,6 +165,8 @@ class ConverterGUI:
         a.holes = self.vars["holes"].get()
         a.merge_overlaps = bool(self.vars["merge_overlaps"].get())
         a.order = self.vars["order"].get()
+        a.fit_circles = bool(self.vars["fit_circles"].get())
+        a.circle_min_r = self._read_var("circle_min_r", float, 2.0)
         a.dpi_hint = 96
         return a
 
