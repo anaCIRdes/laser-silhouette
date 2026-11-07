@@ -71,8 +71,8 @@ def parse_args(argv=None):
     p.add_argument(
         "--simplify",
         type=float,
-        default=0.2,
-        help="polygon simplification tolerance in mm (Douglas-Peucker; default: 0.2)",
+        default=0.1,
+        help="polygon simplification tolerance in mm (Douglas-Peucker; default: 0.1)",
     )
     p.add_argument(
         "--kerf",
@@ -189,7 +189,7 @@ def extract_shapes(
         if smooth > 0:
             ring = chaikin(ring, smooth)
             ring = cv2.approxPolyDP(
-                ring.reshape(-1, 1, 2).astype(np.float32), max(simplify_px / 4, 1.0), True
+                ring.reshape(-1, 1, 2).astype(np.float32), max(simplify_px / 8, 1.0), True
             ).reshape(-1, 2)
         return ring / scale
 
