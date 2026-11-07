@@ -104,6 +104,12 @@ def parse_args(argv=None):
 
 
 def load_binary(path: Path, threshold: int | None, invert: bool, blur: int) -> np.ndarray:
+    """Return a mask where 255 marks the silhouette material.
+
+    Polarity is auto-detected from the image border: if the border is mostly
+    bright, the background is bright and the dark silhouette is the material.
+    ``invert`` flips the detected polarity (bright silhouette on dark ground).
+    """
     img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise SystemExit(f"error: cannot read image: {path}")
@@ -116,8 +122,19 @@ def load_binary(path: Path, threshold: int | None, invert: bool, blur: int) -> n
         _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     else:
         _, binary = cv2.threshold(img, threshold, 255, cv2.THRESH_BINARY)
+
+    border = np.concatenate(
+        [binary[0, :], binary[-1, :], binary[:, 0], binary[:, -1]]
+    )
+    background_bright = np.count_nonzero(border > 127) > border.size / 2
+    material_bright = not background_bright
     if invert:
+        material_bright = not material_bright
+    if not material_bright:
         binary = cv2.bitwise_not(binary)
+    kernel = np.ones((3, 3), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
     return binary
 
 
@@ -163,7 +180,9 @@ def shapes_to_polygons(shapes: list[dict], px_per_mm: float) -> list[Polygon]:
             poly = Polygon(outer, holes)
             if not poly.is_valid:
                 poly = poly.buffer(0)
-            if not poly.is_empty and poly.area > 0:
+            if poly.geom_type == "MultiPolygon":
+                polys.extend(p for p in poly.geoms if p.area > 0)
+            elif not poly.is_empty and poly.area > 0:
                 polys.append(poly)
         except Exception:
             logger.debug("skipping invalid polygon", exc_info=True)
