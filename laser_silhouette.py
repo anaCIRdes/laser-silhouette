@@ -95,6 +95,14 @@ def parse_args(argv=None):
         "circles instead of the jagged merged outline",
     )
     p.add_argument(
+        "--thicken-thin",
+        type=float,
+        default=0.0,
+        metavar="MM",
+        help="thicken structures thinner than ~0.6 mm (strings, antennae) "
+        "up to this width in mm so they become cuttable (0 to disable)",
+    )
+    p.add_argument(
         "--circle-min-r",
         type=float,
         default=2.0,
@@ -151,10 +159,42 @@ def load_binary(path: Path, threshold: int | None, invert: bool, blur: int) -> n
         material_bright = not material_bright
     if not material_bright:
         binary = cv2.bitwise_not(binary)
+    return binary
+
+
+def clean_mask(binary: np.ndarray) -> np.ndarray:
     kernel = np.ones((3, 3), np.uint8)
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
     return binary
+
+
+def thicken_thin(
+    binary: np.ndarray, px_per_mm: float, target_mm: float
+) -> np.ndarray:
+    """Thicken structures thinner than ~0.6 mm up to target_mm so thin
+    features (strings, antennae) survive as cuttable bands.
+
+    A pixel counts as part of a thin structure when no "wide" material
+    interior is nearby, so thin structures are found even when attached
+    to large shapes (e.g. a string tied to a hand)."""
+    mask = (binary > 0).astype(np.uint8)
+    target_px = max(target_mm * px_per_mm, 3.0)
+    thin_px = 3.0
+    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    wide = (dist >= thin_px).astype(np.uint8)
+    wide_reach = cv2.dilate(
+        wide, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    )
+    thin = mask & (wide_reach == 0)
+    if not np.any(thin):
+        return binary
+    radius = int(round(target_px / 2))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+    thick = cv2.dilate(thin, kernel)
+    logger.info("thickened thin structures to %.1f mm", target_mm)
+    result = cv2.bitwise_or(binary, thick)
+    return np.where(result > 0, 255, 0).astype(np.uint8)
 
 
 def upscale_mask(binary: np.ndarray, scale: int = 4) -> np.ndarray:
@@ -260,7 +300,11 @@ def apply_kerf(poly: Polygon, kerf_mm: float) -> Polygon:
 
 
 def process(args) -> list[Polygon]:
-    binary = load_binary(args.input, args.threshold, args.invert, args.blur)
+    blur = args.blur if getattr(args, "thicken_thin", 0) <= 0 else 0
+    binary = load_binary(args.input, args.threshold, args.invert, blur)
+    if getattr(args, "thicken_thin", 0) > 0:
+        binary = thicken_thin(binary, args.px_per_mm, args.thicken_thin)
+    binary = clean_mask(binary)
     shapes = extract_shapes(
         binary, args.px_per_mm, args.min_area_mm2, args.simplify, args.smooth
     )
@@ -276,7 +320,6 @@ def process(args) -> list[Polygon]:
         logger.info("merged into %d shape(s)", len(polys))
 
     if getattr(args, "fit_circles", False):
-        binary = load_binary(args.input, args.threshold, args.invert, args.blur)
         circles = detect_circles(binary, args.px_per_mm, args.circle_min_r)
         logger.info("detected %d circle(s)", len(circles))
         polys = apply_circle_fit(polys, circles, args.min_area_mm2)

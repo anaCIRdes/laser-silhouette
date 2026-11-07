@@ -86,6 +86,7 @@ class ConverterGUI:
         add_combo("Löcher", "holes", ["keep", "discard"], "keep")
         add_check("Kreise erkennen (Ballons etc.)", "fit_circles", False)
         add_entry("Min. Kreisradius", "circle_min_r", 2.0, suffix="mm")
+        add_entry("Dünnes verdicken", "thicken_thin", 0.0, suffix="mm")
         add_check("Überlappungen mergen", "merge_overlaps", False)
         add_combo("Schnittreihenfolge", "order", ["topleft", "inside-out", "none"], "topleft")
 
@@ -167,6 +168,7 @@ class ConverterGUI:
         a.order = self.vars["order"].get()
         a.fit_circles = bool(self.vars["fit_circles"].get())
         a.circle_min_r = self._read_var("circle_min_r", float, 2.0)
+        a.thicken_thin = self._read_var("thicken_thin", float, 0.0)
         a.dpi_hint = 96
         return a
 

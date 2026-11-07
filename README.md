@@ -41,6 +41,7 @@ python3 laser_silhouette.py bild.png -o teil.dxf --kerf 0.1
 | `--holes` | keep | `discard` verwirft Innenkonturen |
 | `--fit-circles` | aus | kreisförmige Teile (z. B. Ballons) als perfekte Kreise exportieren |
 | `--circle-min-r` | 2 | Mindestradius der Kreiserkennung in mm |
+| `--thicken-thin` | 0 | dünnere Strukturen (Schnüre, Fühler) auf diese Breite in mm verdicken, damit sie schneidbar sind |
 | `--merge-overlaps` | aus | überlappende Formen zusammenführen |
 | `--order` | topleft | Schnittreihenfolge (`topleft`, `inside-out`, `none`) |
 | `--dpi-hint` | 96 | DPI-Angabe im SVG |
