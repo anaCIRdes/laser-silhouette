@@ -20,10 +20,11 @@ python3 laser_silhouette.py bild.png -o teil.dxf --kerf 0.1
 1. **Binarisierung** – automatisch (Otsu) oder manueller Schwellwert (`--threshold`), optional invertiert für helle Formen auf dunklem Grund (`--invert`)
 2. **Rauschunterdrückung** – Median-Filter (`--blur`)
 3. **Konturextraktion** – äußere Formen plus Innenkonturen (Löcher) als geschlossene Polygone
-4. **Knotenreduktion** – Douglas-Peucker (`--simplify`, Standard 0,2 mm Toleranz)
-5. **Kerf-Kompensation** – `--kerf 0.1` schrumpft die Kontur um die halbe Schnittfuge-Breite, damit das Teil Maßhaltigkeit behält
-6. **Überlappungs-Merge** – `--merge-overlaps` vereinigt überlappende Formen, um doppelte Schnittlinien zu vermeiden
-7. **Schnittreihenfolge** – `--order topleft` (Lesart) oder `inside-out` (Löcher zuerst)
+4. **Kantenglättung** – 4×-Hochskalierung + Weichzeichnung für subpixelglatte Kanten, plus Chaikin-Glättung (`--smooth`, Standard 2 Iterationen)
+5. **Knotenreduktion** – Douglas-Peucker (`--simplify`, Standard 0,1 mm Toleranz)
+6. **Kerf-Kompensation** – `--kerf 0.1` vergrößert die Außenkontur (und verkleinert Löcher) um die halbe Schnittfuge-Breite, damit das Teil Maßhaltigkeit behält
+7. **Überlappungs-Merge** – `--merge-overlaps` vereinigt überlappende Formen, um doppelte Schnittlinien zu vermeiden
+8. **Schnittreihenfolge** – `--order topleft` (Lesart) oder `inside-out` (Löcher zuerst)
 
 ## Optionen
 
@@ -34,9 +35,13 @@ python3 laser_silhouette.py bild.png -o teil.dxf --kerf 0.1
 | `--invert` | aus | helle Silhouetten auf dunklem Grund |
 | `--blur` | 3 | Median-Blur zur Rauschunterdrückung (0 = aus) |
 | `--min-area-mm2` | 1 | kleinste übernommene Fläche in mm² |
-| `--simplify` | 0.2 | Vereinfachungstoleranz in mm |
+| `--simplify` | 0.1 | Vereinfachungstoleranz in mm |
+| `--smooth` | 2 | Chaikin-Glättungsiterationen (0 = aus) |
 | `--kerf` | 0 | Schnittfugen-Kompensation in mm (z. B. 0.1) |
 | `--holes` | keep | `discard` verwirft Innenkonturen |
+| `--fit-circles` | aus | kreisförmige Teile (z. B. Ballons) als perfekte Kreise exportieren |
+| `--circle-min-r` | 2 | Mindestradius der Kreiserkennung in mm |
+| `--thicken-thin` | 0 | dünnere Strukturen (Schnüre, Fühler) auf diese Breite in mm verdicken, damit sie schneidbar sind |
 | `--merge-overlaps` | aus | überlappende Formen zusammenführen |
 | `--order` | topleft | Schnittreihenfolge (`topleft`, `inside-out`, `none`) |
 | `--dpi-hint` | 96 | DPI-Angabe im SVG |

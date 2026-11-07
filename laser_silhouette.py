@@ -71,14 +71,42 @@ def parse_args(argv=None):
     p.add_argument(
         "--simplify",
         type=float,
-        default=0.2,
-        help="polygon simplification tolerance in mm (Douglas-Peucker; default: 0.2)",
+        default=0.1,
+        help="polygon simplification tolerance in mm (Douglas-Peucker; default: 0.1)",
     )
     p.add_argument(
         "--kerf",
         type=float,
         default=0.0,
-        help="laser kerf compensation in mm; positive shrinks the part outline",
+        help="laser kerf compensation in mm; positive grows the part outline so "
+        "the finished part keeps nominal size",
+    )
+    p.add_argument(
+        "--smooth",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Chaikin smoothing iterations for clean contours (0 to disable, default: 2)",
+    )
+    p.add_argument(
+        "--fit-circles",
+        action="store_true",
+        help="detect circular parts (e.g. balloons) and export them as perfect "
+        "circles instead of the jagged merged outline",
+    )
+    p.add_argument(
+        "--thicken-thin",
+        type=float,
+        default=0.0,
+        metavar="MM",
+        help="thicken structures thinner than ~0.6 mm (strings, antennae) "
+        "up to this width in mm so they become cuttable (0 to disable)",
+    )
+    p.add_argument(
+        "--circle-min-r",
+        type=float,
+        default=2.0,
+        help="minimum circle radius in mm for --fit-circles (default: 2)",
     )
     p.add_argument(
         "--holes",
@@ -103,29 +131,119 @@ def parse_args(argv=None):
 
 
 def load_binary(path: Path, threshold: int | None, invert: bool, blur: int) -> np.ndarray:
+    """Return a mask where 255 marks the silhouette material.
+
+    Polarity is auto-detected from the image border: if the border is mostly
+    bright, the background is bright and the dark silhouette is the material.
+    ``invert`` flips the detected polarity (bright silhouette on dark ground).
+    """
     img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise SystemExit(f"error: cannot read image: {path}")
-    if blur and blur % 2 == 1 and blur > 0:
+    if blur and blur > 0:
+        if blur % 2 == 0:
+            blur += 1
+            logger.info("even blur kernel not supported, using %d", blur)
         img = cv2.medianBlur(img, blur)
     if threshold is None:
         _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     else:
         _, binary = cv2.threshold(img, threshold, 255, cv2.THRESH_BINARY)
+
+    border = np.concatenate(
+        [binary[0, :], binary[-1, :], binary[:, 0], binary[:, -1]]
+    )
+    background_bright = np.count_nonzero(border > 127) > border.size / 2
+    material_bright = not background_bright
     if invert:
+        material_bright = not material_bright
+    if not material_bright:
         binary = cv2.bitwise_not(binary)
     return binary
 
 
+def clean_mask(binary: np.ndarray) -> np.ndarray:
+    kernel = np.ones((3, 3), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    return binary
+
+
+def thicken_thin(
+    binary: np.ndarray, px_per_mm: float, target_mm: float
+) -> np.ndarray:
+    """Thicken structures thinner than ~0.6 mm up to target_mm so thin
+    features (strings, antennae) survive as cuttable bands.
+
+    A pixel counts as part of a thin structure when no "wide" material
+    interior is nearby, so thin structures are found even when attached
+    to large shapes (e.g. a string tied to a hand)."""
+    mask = (binary > 0).astype(np.uint8)
+    target_px = max(target_mm * px_per_mm, 3.0)
+    thin_px = 3.0
+    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    wide = (dist >= thin_px).astype(np.uint8)
+    wide_reach = cv2.dilate(
+        wide, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    )
+    thin = mask & (wide_reach == 0)
+    if not np.any(thin):
+        return binary
+    radius = int(round(target_px / 2))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+    thick = cv2.dilate(thin, kernel)
+    logger.info("thickened thin structures to %.1f mm", target_mm)
+    result = cv2.bitwise_or(binary, thick)
+    return np.where(result > 0, 255, 0).astype(np.uint8)
+
+
+def upscale_mask(binary: np.ndarray, scale: int = 4) -> np.ndarray:
+    """Upscale, blur and re-threshold the mask to get sub-pixel smooth edges."""
+    up = cv2.resize(binary, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+    up = cv2.GaussianBlur(up, (0, 0), scale)
+    _, up = cv2.threshold(up, 127, 255, cv2.THRESH_BINARY)
+    return up
+
+
+def chaikin(points: np.ndarray, iterations: int) -> np.ndarray:
+    """Chaikin corner-cutting smoothing for closed polygons."""
+    pts = points.astype(np.float64)
+    for _ in range(iterations):
+        nxt = np.roll(pts, -1, axis=0)
+        a = 0.75 * pts + 0.25 * nxt
+        b = 0.25 * pts + 0.75 * nxt
+        pts = np.empty((2 * len(pts), 2), np.float64)
+        pts[0::2] = a
+        pts[1::2] = b
+    return pts
+
+
 def extract_shapes(
-    binary: np.ndarray, px_per_mm: float, min_area_mm2: float, simplify_mm: float
+    binary: np.ndarray,
+    px_per_mm: float,
+    min_area_mm2: float,
+    simplify_mm: float,
+    smooth: int,
 ) -> list[dict]:
-    contours, hierarchy = cv2.findContours(binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    scale = 4
+    mask = upscale_mask(binary, scale)
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     if hierarchy is None:
         return []
     hierarchy = hierarchy[0]
-    simplify_px = max(simplify_mm * px_per_mm, 1.0)
-    min_area_px = min_area_mm2 * px_per_mm**2
+    simplify_px = max(simplify_mm * px_per_mm * scale, 1.0)
+    min_area_px = min_area_mm2 * (px_per_mm * scale) ** 2
+
+    def clean_ring(contour: np.ndarray) -> np.ndarray | None:
+        ring = cv2.approxPolyDP(contour, simplify_px, True).reshape(-1, 2)
+        if len(ring) < 3:
+            return None
+        if smooth > 0:
+            ring = chaikin(ring, smooth)
+            ring = cv2.approxPolyDP(
+                ring.reshape(-1, 1, 2).astype(np.float32), max(simplify_px / 8, 1.0), True
+            ).reshape(-1, 2)
+        return ring / scale
 
     shapes = []
     for i, contour in enumerate(contours):
@@ -133,15 +251,15 @@ def extract_shapes(
             continue
         if cv2.contourArea(contour) < min_area_px:
             continue
-        outer = cv2.approxPolyDP(contour, simplify_px, True).reshape(-1, 2)
-        if len(outer) < 3:
+        outer = clean_ring(contour)
+        if outer is None:
             continue
         holes = []
         child = hierarchy[i][2]
         while child != -1:
             if cv2.contourArea(contours[child]) >= min_area_px:
-                hole = cv2.approxPolyDP(contours[child], simplify_px, True).reshape(-1, 2)
-                if len(hole) >= 3:
+                hole = clean_ring(contours[child])
+                if hole is not None:
                     holes.append(hole)
             child = hierarchy[child][0]
         shapes.append({"outer": outer, "holes": holes})
@@ -159,7 +277,9 @@ def shapes_to_polygons(shapes: list[dict], px_per_mm: float) -> list[Polygon]:
             poly = Polygon(outer, holes)
             if not poly.is_valid:
                 poly = poly.buffer(0)
-            if not poly.is_empty and poly.area > 0:
+            if poly.geom_type == "MultiPolygon":
+                polys.extend(p for p in poly.geoms if p.area > 0)
+            elif not poly.is_empty and poly.area > 0:
                 polys.append(poly)
         except Exception:
             logger.debug("skipping invalid polygon", exc_info=True)
@@ -167,18 +287,27 @@ def shapes_to_polygons(shapes: list[dict], px_per_mm: float) -> list[Polygon]:
 
 
 def apply_kerf(poly: Polygon, kerf_mm: float) -> Polygon:
+    # The beam removes material on both sides of the path (kerf/2 each), so the
+    # part ends up undersized and holes oversized. Compensate by growing the
+    # polygon: outer contour moves outward by kerf/2, holes move inward.
     if kerf_mm == 0:
         return poly
-    shrunk = poly.buffer(-kerf_mm / 2.0, join_style=2)
-    if shrunk.is_empty:
+    grown = poly.buffer(kerf_mm / 2.0, join_style=2)
+    if grown.is_empty:
         logger.warning("kerf too large: shape vanished, keeping original outline")
         return poly
-    return shrunk
+    return grown
 
 
 def process(args) -> list[Polygon]:
-    binary = load_binary(args.input, args.threshold, args.invert, args.blur)
-    shapes = extract_shapes(binary, args.px_per_mm, args.min_area_mm2, args.simplify)
+    blur = args.blur if getattr(args, "thicken_thin", 0) <= 0 else 0
+    binary = load_binary(args.input, args.threshold, args.invert, blur)
+    if getattr(args, "thicken_thin", 0) > 0:
+        binary = thicken_thin(binary, args.px_per_mm, args.thicken_thin)
+    binary = clean_mask(binary)
+    shapes = extract_shapes(
+        binary, args.px_per_mm, args.min_area_mm2, args.simplify, args.smooth
+    )
     logger.info("found %d shape(s)", len(shapes))
     polys = shapes_to_polygons(shapes, args.px_per_mm)
 
@@ -190,6 +319,11 @@ def process(args) -> list[Polygon]:
         polys = list(merged.geoms) if merged.geom_type == "MultiPolygon" else [merged]
         logger.info("merged into %d shape(s)", len(polys))
 
+    if getattr(args, "fit_circles", False):
+        circles = detect_circles(binary, args.px_per_mm, args.circle_min_r)
+        logger.info("detected %d circle(s)", len(circles))
+        polys = apply_circle_fit(polys, circles, args.min_area_mm2)
+
     polys = [apply_kerf(p, args.kerf) for p in polys]
 
     if args.holes == "discard":
@@ -197,6 +331,62 @@ def process(args) -> list[Polygon]:
 
     order_shapes(polys, args.order)
     return polys
+
+
+def disk(cx: float, cy: float, r: float, segments: int = 72) -> Polygon:
+    angles = np.linspace(0, 2 * np.pi, segments, endpoint=False)
+    return Polygon(
+        [(cx + r * np.cos(a), cy + r * np.sin(a)) for a in angles]
+    )
+
+
+def detect_circles(binary: np.ndarray, px_per_mm: float, min_r_mm: float) -> list[Polygon]:
+    """Detect filled circular regions in the material mask and return them
+    as polygons in mm coordinates (y flipped like shapes_to_polygons)."""
+    h, w = binary.shape
+    min_r = max(min_r_mm * px_per_mm, 3.0)
+    max_r = min(h, w) / 2.0
+    if max_r <= min_r:
+        return []
+    blur = cv2.GaussianBlur(binary, (9, 9), 2)
+    found = cv2.HoughCircles(
+        blur,
+        cv2.HOUGH_GRADIENT,
+        dp=1,
+        minDist=int(min_r * 2),
+        param1=100,
+        param2=35,
+        minRadius=int(min_r),
+        maxRadius=int(max_r),
+    )
+    if found is None:
+        return []
+    circles = []
+    for cx, cy, r in np.round(found[0]).astype(int):
+        if r <= 0 or r > max_r:
+            continue
+        mask = np.zeros((h, w), np.uint8)
+        cv2.circle(mask, (cx, cy), r, 1, -1)
+        coverage = np.count_nonzero(mask & (binary > 0)) / np.count_nonzero(mask)
+        if coverage < 0.8:
+            continue
+        circles.append(disk(cx / px_per_mm, -cy / px_per_mm, r / px_per_mm))
+    return circles
+
+
+def apply_circle_fit(
+    polys: list[Polygon], circles: list[Polygon], min_area_mm2: float
+) -> list[Polygon]:
+    """Cut detected circles out of the shapes and add them as separate parts."""
+    result = []
+    for poly in polys:
+        rest = poly
+        for circ in circles:
+            rest = rest.difference(circ)
+        parts = rest.geoms if rest.geom_type == "MultiPolygon" else [rest]
+        result.extend(p for p in parts if p.area >= min_area_mm2)
+    result.extend(c for c in circles if c.area >= min_area_mm2)
+    return result
 
 
 def order_shapes(polys: list[Polygon], mode: str) -> None:
@@ -252,8 +442,6 @@ def write_svg(polys: list[Polygon], path: Path, dpi_hint: int) -> None:
 def write_dxf(polys: list[Polygon], path: Path) -> None:
     doc = ezdxf.new("R2000", setup=False)
     doc.header["$INSUNITS"] = 4
-    doc.header["$EXTMIN"] = (0.0, 0.0, 0.0)
-    doc.header["$EXTMAX"] = (0.0, 0.0, 0.0)
     msp = doc.modelspace()
     minx, miny, _, maxy = bounds_mm(polys)
     for poly in polys:
